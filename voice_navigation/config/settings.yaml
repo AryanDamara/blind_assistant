@@ -106,6 +106,13 @@ distance:
       ref_distance_m: 5.0
     
     # Add more objects as you calibrate
+  
+  # Fallback for uncalibrated objects
+  fallback:
+    enabled: true
+    estimated_height_m: 1.0      # Assume ~1m tall for unknown objects
+    ref_bbox_height: 200         # Generic calibration at 2m
+    ref_distance_m: 2.0
 
 # ============================================
 # SCENE ANALYSIS
