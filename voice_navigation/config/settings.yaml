@@ -15,6 +15,9 @@ camera:
   
   # Warmup (some cameras need a few frames to adjust exposure)
   warmup_frames: 10
+  
+  # Video file looping (when source is a video file)
+  loop_video: true               # Loop video when reaching end
 
 # ============================================
 # YOLO DETECTION

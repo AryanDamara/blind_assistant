@@ -7,9 +7,11 @@ Runs as a background thread, pushing frames to an internal queue.
 Features:
 - Supports webcam (int) or video file (str path)
 - Internal queue with configurable buffer size
-- Timestamps on each frame
+- Timestamps on each frame with latency tracking
 - Auto-restart on failure
 - Warmup frame handling
+- Statistics tracking
+- Configurable video looping
 """
 
 import cv2
@@ -19,18 +21,44 @@ import threading
 import yaml
 import os
 from dataclasses import dataclass
-from typing import Optional, Union, Tuple
+from typing import Optional, Union
 import numpy as np
 
 
 @dataclass
-class FramePacket:
-    """Container for a captured frame with metadata."""
-    frame: np.ndarray          # The actual frame (BGR format)
-    timestamp: float           # Capture time (time.time())
-    frame_id: int              # Sequential frame counter
+class Frame:
+    """
+    Frame container with complete metadata for latency tracking.
+    Aligned with telemetry logging format.
+    """
+    data: np.ndarray              # The actual frame (BGR format)
+    frame_id: int                 # Sequential frame counter
+    capture_time: float           # When frame was captured (time.time())
+    queue_time: float             # When frame was added to queue
     width: int
     height: int
+    source: str                   # Camera source identifier
+    
+    def get_queue_latency(self) -> float:
+        """Time spent waiting in queue (milliseconds)."""
+        return (time.time() - self.queue_time) * 1000
+    
+    def get_age(self) -> float:
+        """Total age since capture (milliseconds)."""
+        return (time.time() - self.capture_time) * 1000
+    
+    def to_dict(self) -> dict:
+        """Convert to dict for telemetry logging."""
+        return {
+            'frame_id': self.frame_id,
+            'capture_time': self.capture_time,
+            'queue_time': self.queue_time,
+            'width': self.width,
+            'height': self.height,
+            'source': self.source,
+            'age_ms': self.get_age(),
+            'queue_latency_ms': self.get_queue_latency()
+        }
 
 
 class CameraCapture:
@@ -42,9 +70,9 @@ class CameraCapture:
         camera.start()
         
         while running:
-            packet = camera.get_frame(timeout=1.0)
-            if packet:
-                process(packet.frame)
+            frame = camera.get_frame(timeout=1.0)
+            if frame:
+                process(frame.data)
         
         camera.stop()
     """
@@ -68,6 +96,12 @@ class CameraCapture:
         self._consecutive_errors: int = 0
         self._last_error: Optional[str] = None
         
+        # Statistics tracking
+        self._frames_captured: int = 0
+        self._frames_dropped: int = 0
+        self._total_queue_latency: float = 0.0
+        self._max_queue_latency: float = 0.0
+        
     def _load_config(self, config_path: str) -> None:
         """Load camera settings from YAML config."""
         # Defaults
@@ -80,6 +114,7 @@ class CameraCapture:
         self._auto_restart: bool = True
         self._restart_delay: float = 2.0
         self._warmup_frames: int = 10
+        self._loop_video: bool = True
         
         # Load from file if exists
         if os.path.exists(config_path):
@@ -96,10 +131,24 @@ class CameraCapture:
                 self._auto_restart = cam_cfg.get('auto_restart', True)
                 self._restart_delay = cam_cfg.get('restart_delay_sec', 2.0)
                 self._warmup_frames = cam_cfg.get('warmup_frames', 10)
+                self._loop_video = cam_cfg.get('loop_video', True)
+    
+    def _validate_source(self) -> bool:
+        """Validate source exists before opening."""
+        if isinstance(self._source, str):
+            if not os.path.exists(self._source):
+                self._last_error = f"Video file not found: {self._source}"
+                print(f"[CameraCapture] ERROR: {self._last_error}")
+                return False
+        return True
     
     def _init_capture(self) -> bool:
         """Initialize the video capture device."""
         try:
+            # Validate source first
+            if not self._validate_source():
+                return False
+            
             # Release existing capture if any
             if self._cap is not None:
                 self._cap.release()
@@ -148,75 +197,91 @@ class CameraCapture:
         """Main capture loop running in background thread."""
         print("[CameraCapture] Capture thread started")
         
-        while not self._stop_event.is_set():
-            # Check if capture is valid
-            if self._cap is None or not self._cap.isOpened():
-                if self._auto_restart:
-                    print(f"[CameraCapture] Attempting restart in {self._restart_delay}s...")
-                    time.sleep(self._restart_delay)
-                    if not self._init_capture():
-                        self._consecutive_errors += 1
-                        continue
-                else:
-                    print("[CameraCapture] Camera not available, stopping")
-                    break
-            
-            # Read frame
-            ret, frame = self._cap.read()
-            timestamp = time.time()
-            
-            if not ret or frame is None:
-                self._consecutive_errors += 1
-                self._last_error = "Failed to read frame"
+        try:
+            while not self._stop_event.is_set():
+                # Check if capture is valid
+                if self._cap is None or not self._cap.isOpened():
+                    if self._auto_restart:
+                        print(f"[CameraCapture] Attempting restart in {self._restart_delay}s...")
+                        time.sleep(self._restart_delay)
+                        if not self._init_capture():
+                            self._consecutive_errors += 1
+                            continue
+                    else:
+                        print("[CameraCapture] Camera not available, stopping")
+                        break
                 
-                # Check if video file ended
-                if isinstance(self._source, str):
-                    print("[CameraCapture] Video file ended")
-                    # Optionally loop video
-                    self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                # Read frame
+                ret, frame = self._cap.read()
+                capture_timestamp = time.time()
+                
+                if not ret or frame is None:
+                    self._consecutive_errors += 1
+                    self._last_error = "Failed to read frame"
+                    
+                    # Check if video file ended
+                    if isinstance(self._source, str):
+                        print("[CameraCapture] Video file ended")
+                        if self._loop_video:
+                            self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                            print("[CameraCapture] Looping video...")
+                            continue
+                        else:
+                            print("[CameraCapture] Stopping (loop disabled)")
+                            break
+                    
+                    if self._consecutive_errors > 10:
+                        print("[CameraCapture] Too many consecutive errors")
+                        if self._auto_restart:
+                            self._cap.release()
+                            self._cap = None
                     continue
                 
-                if self._consecutive_errors > 10:
-                    print("[CameraCapture] Too many consecutive errors")
-                    if self._auto_restart:
-                        self._cap.release()
-                        self._cap = None
-                continue
-            
-            # Reset error counter on success
-            self._consecutive_errors = 0
-            
-            # Create frame packet
-            self._frame_counter += 1
-            packet = FramePacket(
-                frame=frame,
-                timestamp=timestamp,
-                frame_id=self._frame_counter,
-                width=frame.shape[1],
-                height=frame.shape[0]
-            )
-            
-            # Add to queue (non-blocking, drop old frames if full)
-            try:
-                # If queue is full, remove oldest frame
+                # Reset error counter on success
+                self._consecutive_errors = 0
+                self._frames_captured += 1
+                
+                # Create frame packet with both timestamps
+                queue_timestamp = time.time()
+                packet = Frame(
+                    data=frame,
+                    frame_id=self._frames_captured,
+                    capture_time=capture_timestamp,
+                    queue_time=queue_timestamp,
+                    width=frame.shape[1],
+                    height=frame.shape[0],
+                    source=str(self._source)
+                )
+                
+                # Add to queue (non-blocking, drop old frames if full)
                 if self._frame_queue.full():
                     try:
-                        self._frame_queue.get_nowait()
+                        dropped = self._frame_queue.get_nowait()
+                        self._frames_dropped += 1
+                        
+                        # Warn if dropped frame was stale (>500ms old)
+                        dropped_latency = dropped.get_age()
+                        if dropped_latency > 500:
+                            print(f"[CameraCapture] ⚠️  Dropped stale frame {dropped.frame_id} "
+                                  f"(age: {dropped_latency:.0f}ms)")
                     except queue.Empty:
                         pass
                 
-                self._frame_queue.put_nowait(packet)
-                
-            except queue.Full:
-                # This shouldn't happen after the above check, but just in case
-                pass
+                try:
+                    self._frame_queue.put_nowait(packet)
+                except queue.Full:
+                    pass
         
-        # Cleanup
-        if self._cap is not None:
-            self._cap.release()
-            self._cap = None
+        except Exception as e:
+            print(f"[CameraCapture] FATAL ERROR in capture loop: {e}")
+            self._last_error = str(e)
         
-        print("[CameraCapture] Capture thread stopped")
+        finally:
+            # Ensure cleanup happens
+            if self._cap is not None:
+                self._cap.release()
+                self._cap = None
+            print("[CameraCapture] Capture thread stopped")
     
     def start(self) -> bool:
         """
@@ -228,6 +293,18 @@ class CameraCapture:
         if self._running:
             print("[CameraCapture] Already running")
             return True
+        
+        # Print configuration summary
+        print(f"""
+[CameraCapture] Configuration:
+  Source: {self._source}
+  Resolution: {self._width}x{self._height}
+  FPS: {self._fps}
+  Buffer size: {self._buffer_size}
+  Frame skip: {self._frame_skip}
+  Auto-restart: {self._auto_restart}
+  Loop video: {self._loop_video}
+        """)
         
         # Initialize capture
         if not self._init_capture():
@@ -246,7 +323,7 @@ class CameraCapture:
         return True
     
     def stop(self) -> None:
-        """Stop the camera capture thread."""
+        """Stop the camera capture thread and print statistics."""
         if not self._running:
             return
         
@@ -266,9 +343,19 @@ class CameraCapture:
             except queue.Empty:
                 break
         
+        # Print statistics
+        stats = self.get_stats()
+        print(f"""
+[CameraCapture] Session Statistics:
+  Frames captured: {stats['frames_captured']}
+  Frames dropped: {stats['frames_dropped']} ({stats['drop_rate']:.1%})
+  Avg queue latency: {stats['avg_queue_latency_ms']:.1f}ms
+  Max queue latency: {stats['max_queue_latency_ms']:.1f}ms
+        """)
+        
         print("[CameraCapture] Stopped")
     
-    def get_frame(self, timeout: float = 1.0) -> Optional[FramePacket]:
+    def get_frame(self, timeout: float = 1.0) -> Optional[Frame]:
         """
         Get the next frame from the queue.
         
@@ -276,27 +363,65 @@ class CameraCapture:
             timeout: Max seconds to wait for a frame
             
         Returns:
-            FramePacket or None if no frame available
+            Frame or None if no frame available
         """
         try:
-            return self._frame_queue.get(timeout=timeout)
+            frame = self._frame_queue.get(timeout=timeout)
+            
+            # Track queue latency statistics
+            queue_latency = frame.get_queue_latency()
+            self._total_queue_latency += queue_latency
+            self._max_queue_latency = max(self._max_queue_latency, queue_latency)
+            
+            return frame
         except queue.Empty:
             return None
     
-    def get_latest_frame(self) -> Optional[FramePacket]:
+    def get_latest_frame(self) -> Optional[Frame]:
         """
         Get the most recent frame, discarding any older ones.
         
         Returns:
-            FramePacket or None if no frame available
+            Frame or None if no frame available
         """
         latest = None
-        while True:
+        discarded = 0
+        
+        # Get all available frames, keep only the last one
+        while not self._frame_queue.empty():
             try:
-                latest = self._frame_queue.get_nowait()
+                frame = self._frame_queue.get_nowait()
+                if latest is not None:
+                    discarded += 1
+                latest = frame
             except queue.Empty:
                 break
+        
+        if discarded > 0:
+            print(f"[CameraCapture] Discarded {discarded} old frames")
+        
+        # Track latency if we got a frame
+        if latest is not None:
+            queue_latency = latest.get_queue_latency()
+            self._total_queue_latency += queue_latency
+            self._max_queue_latency = max(self._max_queue_latency, queue_latency)
+        
         return latest
+    
+    def get_stats(self) -> dict:
+        """Get camera statistics for monitoring."""
+        avg_queue_latency = (
+            self._total_queue_latency / max(1, self._frames_captured)
+        )
+        
+        return {
+            'frames_captured': self._frames_captured,
+            'frames_dropped': self._frames_dropped,
+            'drop_rate': self._frames_dropped / max(1, self._frames_captured),
+            'avg_queue_latency_ms': avg_queue_latency,
+            'max_queue_latency_ms': self._max_queue_latency,
+            'queue_size': self.queue_size
+        }
     
     @property
     def is_running(self) -> bool:
@@ -349,9 +474,9 @@ if __name__ == "__main__":
         
         while True:
             # Get frame
-            packet = camera.get_frame(timeout=1.0)
+            frame_packet = camera.get_frame(timeout=1.0)
             
-            if packet is None:
+            if frame_packet is None:
                 print("No frame received")
                 continue
             
@@ -361,19 +486,31 @@ if __name__ == "__main__":
             elapsed = time.time() - start_time
             fps = frame_count / elapsed if elapsed > 0 else 0
             
+            # Get frame age
+            age_ms = frame_packet.get_age()
+            
             # Display frame info
             cv2.putText(
-                packet.frame,
-                f"Frame: {packet.frame_id} | FPS: {fps:.1f} | Queue: {camera.queue_size}",
+                frame_packet.data,
+                f"Frame: {frame_packet.frame_id} | FPS: {fps:.1f} | Age: {age_ms:.0f}ms",
                 (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
+                0.6,
+                (0, 255, 0),
+                2
+            )
+            cv2.putText(
+                frame_packet.data,
+                f"Queue: {camera.queue_size} | Dropped: {camera.get_stats()['frames_dropped']}",
+                (10, 60),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
                 (0, 255, 0),
                 2
             )
             
             # Show frame
-            cv2.imshow("Camera Test", packet.frame)
+            cv2.imshow("Camera Test", frame_packet.data)
             
             # Check for quit
             if cv2.waitKey(1) & 0xFF == ord('q'):
