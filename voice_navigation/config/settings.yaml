@@ -75,6 +75,9 @@ safety:
   # Alert deduplication
   deduplication_window_sec: 3.0  # Don't repeat same alert within 3 sec
   
+  # Center zone sensitivity (lower = more sensitive)
+  center_zone_multiplier: 0.8    # 20% more sensitive for center zone
+  
   # Priority boost for certain objects
   priority_boost:
     car: 20
