@@ -185,6 +185,9 @@ audio:
   # Interrupt mode
   interrupt_on_critical: true    # Stop current speech for critical alerts
   
+  # Max alerts to announce per detection cycle
+  max_alerts_per_cycle: 3        # Top N alerts by priority
+  
   # Voice selection (try different indices)
   voice_index: 0                 # 0 = default system voice
 
