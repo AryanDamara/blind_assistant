@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+"""
+Voice Navigation System - Main Orchestrator
+--------------------------------------------
+Real-time navigation assistance for visually impaired users.
+
+Pipeline: Camera → YOLO Detection → Safety Analysis → Audio Feedback
+
+Usage:
+    python src/main.py
+    
+Press 'q' to quit (when video window is shown)
+Press Ctrl+C to quit (in any mode)
+"""
+
+import os
+import sys
+import time
+import signal
+import yaml
+import cv2
+from typing import Optional
+
+# Add src to path for imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from camera_capture import CameraCapture
+from object_detector import ObjectDetector
+from safety_manager import SafetyManager
+from audio_feedback import AudioFeedback
+
+
+class NavigationSystem:
+    """
+    Main orchestrator for the voice navigation system.
+    
+    Coordinates all modules:
+    - CameraCapture: Video input
+    - ObjectDetector: YOLO detection
+    - SafetyManager: Distance/zone/danger analysis
+    - AudioFeedback: Text-to-speech output
+    """
+    
+    def __init__(self, config_path: str = "config/settings.yaml"):
+        """Initialize the navigation system."""
+        self.config_path = config_path
+        self._load_config()
+        
+        # Modules (initialized in start())
+        self.camera: Optional[CameraCapture] = None
+        self.detector: Optional[ObjectDetector] = None
+        self.safety: Optional[SafetyManager] = None
+        self.audio: Optional[AudioFeedback] = None
+        
+        # State
+        self._running = False
+        self._frame_count = 0
+        self._start_time = 0.0
+        self._error_count = 0
+        
+        # Statistics
+        self._total_frames = 0
+        self._total_detections = 0
+        self._total_alerts = 0
+        
+        # Register signal handler for graceful shutdown
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+    
+    def _load_config(self) -> None:
+        """Load configuration from YAML."""
+        self.config = {}
+        
+        if os.path.exists(self.config_path):
+            with open(self.config_path, 'r') as f:
+                self.config = yaml.safe_load(f)
+        
+        # Debug settings
+        debug_cfg = self.config.get('debug', {})
+        self._show_video = debug_cfg.get('show_video', True)
+        self._show_bboxes = debug_cfg.get('show_bboxes', True)
+        self._show_zones = debug_cfg.get('show_zones', True)
+        self._show_fps = debug_cfg.get('show_fps', True)
+        self._print_latency = debug_cfg.get('print_latency', True)
+        self._print_detections = debug_cfg.get('print_detections', True)
+        self._print_alerts = debug_cfg.get('print_alerts', False)
+        
+        # System settings
+        system_cfg = self.config.get('system', {})
+        self._quit_key = ord(system_cfg.get('quit_key', 'q'))
+        self._max_errors = system_cfg.get('max_consecutive_errors', 10)
+        self._shutdown_timeout = system_cfg.get('shutdown_timeout_sec', 5.0)
+    
+    def _signal_handler(self, sig, frame) -> None:
+        """Handle Ctrl+C and other signals gracefully."""
+        print("\n[Main] Shutdown signal received...")
+        self._running = False
+    
+    def start(self) -> bool:
+        """
+        Initialize and start all modules.
+        
+        Returns:
+            bool: True if started successfully
+        """
+        print("=" * 60)
+        print("Voice Navigation System - Starting")
+        print("=" * 60)
+        
+        try:
+            # Initialize modules
+            print("\n[Main] Initializing modules...")
+            
+            self.camera = CameraCapture(config_path=self.config_path)
+            self.detector = ObjectDetector(config_path=self.config_path)
+            self.safety = SafetyManager(config_path=self.config_path)
+            self.audio = AudioFeedback(config_path=self.config_path)
+            
+            # Start modules
+            print("\n[Main] Starting modules...")
+            
+            if not self.camera.start():
+                print("[Main] ERROR: Failed to start camera")
+                return False
+            
+            if not self.audio.start():
+                print("[Main] WARNING: Audio not started, continuing without audio")
+                self.audio = None  # Set to None for easy null checks
+            
+            self._running = True
+            self._start_time = time.time()
+            
+            print("\n" + "=" * 60)
+            if self._show_video:
+                print("System ready! Press 'q' to quit.")
+            else:
+                print("System ready! Running in headless mode.")
+                print("Press Ctrl+C to quit.")
+            print("=" * 60 + "\n")
+            
+            return True
+            
+        except Exception as e:
+            print(f"[Main] ERROR during startup: {e}")
+            self.stop()
+            return False
+    
+    def stop(self) -> None:
+        """Stop all modules and cleanup."""
+        print("\n[Main] Stopping system...")
+        self._running = False
+        
+        # Stop modules (in reverse order)
+        if self.audio is not None:
+            self.audio.stop()
+        
+        if self.camera is not None:
+            self.camera.stop()
+        
+        # Close video window
+        if self._show_video:
+            cv2.destroyAllWindows()
+        
+        # Print final statistics
+        self._print_final_stats()
+        
+        print("[Main] System stopped")
+    
+    def run(self) -> None:
+        """Main processing loop."""
+        if not self._running:
+            if not self.start():
+                return
+        
+        frame_skip = self.camera.frame_skip
+        
+        while self._running:
+            try:
+                # Get frame from camera
+                frame_packet = self.camera.get_frame(timeout=1.0)
+                
+                if frame_packet is None:
+                    self._error_count += 1
+                    if self._error_count >= self._max_errors:
+                        print(f"[Main] Too many consecutive errors ({self._max_errors}), stopping")
+                        break
+                    continue
+                
+                self._error_count = 0
+                self._frame_count += 1
+                self._total_frames += 1
+                
+                # Skip frames for performance
+                if self._frame_count % frame_skip != 0:
+                    # Still update display if enabled
+                    if self._show_video:
+                        cv2.imshow('Navigation System', frame_packet.data)
+                        if cv2.waitKey(1) & 0xFF == self._quit_key:
+                            print("[Main] Quit key pressed")
+                            break
+                    continue
+                
+                # Run detection
+                loop_start = time.time()
+                detection_result = self.detector.detect(
+                    frame_packet.data,
+                    frame_id=frame_packet.frame_id
+                )
+                detection_time = (time.time() - loop_start) * 1000
+                
+                self._total_detections += detection_result.count
+                
+                # Run safety analysis
+                safety_start = time.time()
+                safety_result = self.safety.analyze(
+                    detection_result.detections,
+                    frame_width=frame_packet.width,
+                    frame_id=frame_packet.frame_id
+                )
+                safety_time = (time.time() - safety_start) * 1000
+                
+                self._total_alerts += len(safety_result.alerts)
+                
+                # Announce alerts
+                if safety_result.alerts and self.audio:
+                    self.audio.announce_alerts(safety_result.alerts)
+                    
+                    if self._print_alerts:
+                        for alert in safety_result.alerts[:3]:
+                            print(f"  🔊 [{alert.danger_level.upper()}] {alert.get_announcement()}")
+                
+                # Print latency info
+                if self._print_latency and self._frame_count % 30 == 0:
+                    total_time = (time.time() - loop_start) * 1000
+                    elapsed = time.time() - self._start_time
+                    actual_fps = self._total_frames / elapsed if elapsed > 0 else 0
+                    print(f"[Latency] Detection: {detection_time:.0f}ms | "
+                          f"Safety: {safety_time:.0f}ms | "
+                          f"Total: {total_time:.0f}ms | "
+                          f"FPS: {actual_fps:.1f}")
+                
+                # Print detections
+                if self._print_detections and detection_result.count > 0:
+                    objects = [f"{d.class_name}({d.confidence:.2f})" 
+                              for d in detection_result.detections[:5]]
+                    print(f"[Detected] {', '.join(objects)}")
+                
+                # Update display if enabled
+                if self._show_video:
+                    display_frame = self._draw_overlay(
+                        frame_packet.data,
+                        detection_result,
+                        safety_result
+                    )
+                    cv2.imshow('Navigation System', display_frame)
+                    
+                    if cv2.waitKey(1) & 0xFF == self._quit_key:
+                        print("[Main] Quit key pressed")
+                        break
+                
+            except Exception as e:
+                print(f"[Main] ERROR in main loop: {e}")
+                self._error_count += 1
+                if self._error_count >= self._max_errors:
+                    print(f"[Main] Too many errors, stopping")
+                    break
+        
+        self.stop()
+    
+    def _draw_overlay(self, frame, detection_result, safety_result) -> any:
+        """Draw debug overlay on frame."""
+        display = frame.copy()
+        height, width = display.shape[:2]
+        
+        # Draw zone lines
+        if self._show_zones:
+            left_line = int(width * 0.3)
+            right_line = int(width * 0.7)
+            cv2.line(display, (left_line, 0), (left_line, height), (100, 100, 100), 1)
+            cv2.line(display, (right_line, 0), (right_line, height), (100, 100, 100), 1)
+            
+            # Zone labels
+            cv2.putText(display, "LEFT", (10, height - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
+            cv2.putText(display, "CENTER", (width//2 - 30, height - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
+            cv2.putText(display, "RIGHT", (width - 60, height - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
+        
+        # Draw bounding boxes with danger colors
+        if self._show_bboxes:
+            danger_colors = {
+                'critical': (0, 0, 255),   # Red
+                'warning': (0, 165, 255),  # Orange
+                'info': (0, 255, 0)        # Green
+            }
+            
+            # Draw all detections in gray first (thin boxes)
+            for det in detection_result.detections:
+                x1, y1, x2, y2 = det.bbox
+                cv2.rectangle(display, (x1, y1), (x2, y2), (128, 128, 128), 1)
+                label = f"{det.class_name} {det.confidence:.2f}"
+                cv2.putText(display, label, (x1, y1 - 10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (128, 128, 128), 1)
+            
+            # Overdraw alerts with danger colors (thicker boxes)
+            for alert in safety_result.alerts:
+                x1, y1, x2, y2 = alert.bbox
+                color = danger_colors.get(alert.danger_level, (0, 255, 0))
+                cv2.rectangle(display, (x1, y1), (x2, y2), color, 2)
+                
+                label = f"{alert.class_name} {alert.distance_m}m [{alert.danger_level}]"
+                cv2.putText(display, label, (x1, y1 - 10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        
+        # Draw FPS
+        if self._show_fps:
+            elapsed = time.time() - self._start_time
+            fps = self._total_frames / elapsed if elapsed > 0 else 0
+            fps_text = f"FPS: {fps:.1f} | Frame: {self._frame_count}"
+            cv2.putText(display, fps_text, (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        # Draw alert summary
+        alert_text = (f"Alerts: {len(safety_result.alerts)} "
+                     f"(C:{safety_result.critical_count} "
+                     f"W:{safety_result.warning_count} "
+                     f"I:{safety_result.info_count})")
+        cv2.putText(display, alert_text, (10, 60),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        return display
+    
+    def _print_final_stats(self) -> None:
+        """Print final session statistics."""
+        elapsed = time.time() - self._start_time if self._start_time > 0 else 0
+        
+        print("\n" + "=" * 60)
+        print("Session Statistics")
+        print("=" * 60)
+        print(f"  Duration: {elapsed:.1f} seconds")
+        print(f"  Total frames: {self._total_frames}")
+        print(f"  Average FPS: {self._total_frames / elapsed if elapsed > 0 else 0:.1f}")
+        print(f"  Total detections: {self._total_detections}")
+        print(f"  Total alerts: {self._total_alerts}")
+        
+        if self.detector:
+            det_stats = self.detector.get_stats()
+            print(f"  Avg inference time: {det_stats['avg_inference_time_ms']:.1f}ms")
+        
+        if self.safety:
+            safety_stats = self.safety.get_stats()
+            print(f"  Deduplicated alerts: {safety_stats['deduplicated_alerts']}")
+        
+        if self.audio:
+            audio_stats = self.audio.get_stats()
+            print(f"  Announcements: {audio_stats['total_announcements']}")
+            print(f"  Interrupted: {audio_stats['interrupted_count']}")
+        
+        print("=" * 60)
+
+
+def main():
+    """Entry point."""
+    # Determine config path
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+    config_path = os.path.join(project_root, "config", "settings.yaml")
+    
+    # Check if config exists
+    if not os.path.exists(config_path):
+        # Try relative path
+        config_path = "config/settings.yaml"
+        if not os.path.exists(config_path):
+            print(f"[Main] ERROR: Config file not found")
+            print(f"  Tried: {config_path}")
+            sys.exit(1)
+    
+    print(f"[Main] Using config: {config_path}")
+    
+    # Create and run system
+    system = NavigationSystem(config_path=config_path)
+    system.run()
+
+
+if __name__ == "__main__":
+    main()
