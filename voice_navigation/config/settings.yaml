@@ -2,7 +2,8 @@
 # CAMERA CONFIGURATION
 # ============================================
 camera:
-  source: 0                      # 0 for webcam, or path like "test_video.mp4"
+  source: 0
+  backend: "avfoundation"
   width: 640
   height: 480
   fps: 30
