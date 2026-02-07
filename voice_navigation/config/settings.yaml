@@ -196,10 +196,11 @@ audio:
 # VOICE INPUT (Phase 2)
 # ============================================
 voice_input:
-  enabled: false                 # Enable in Phase 2
+  enabled: true                  # Enable in Phase 2
   activation_mode: "push_to_talk" # "push_to_talk" | "always_listening"
   activation_key: "space"
   timeout_sec: 5.0
+  phrase_time_limit: 10.0        # Max phrase length in seconds
   
   # Microphone settings
   mic_index: null                # null = default mic

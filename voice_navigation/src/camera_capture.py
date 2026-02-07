@@ -132,6 +132,7 @@ class CameraCapture:
                 self._restart_delay = cam_cfg.get('restart_delay_sec', 2.0)
                 self._warmup_frames = cam_cfg.get('warmup_frames', 10)
                 self._loop_video = cam_cfg.get('loop_video', True)
+                self._backend = cam_cfg.get('backend', None)  # e.g., 'avfoundation' for macOS
     
     def _validate_source(self) -> bool:
         """Validate source exists before opening."""
@@ -153,8 +154,23 @@ class CameraCapture:
             if self._cap is not None:
                 self._cap.release()
             
-            # Open capture source
-            self._cap = cv2.VideoCapture(self._source)
+            # Open capture source with optional backend
+            if hasattr(self, '_backend') and self._backend:
+                backend_map = {
+                    'avfoundation': cv2.CAP_AVFOUNDATION,
+                    'v4l2': cv2.CAP_V4L2,
+                    'dshow': cv2.CAP_DSHOW,
+                    'gstreamer': cv2.CAP_GSTREAMER,
+                }
+                backend = backend_map.get(self._backend.lower())
+                if backend is not None:
+                    print(f"[CameraCapture] Using backend: {self._backend}")
+                    self._cap = cv2.VideoCapture(self._source, backend)
+                else:
+                    print(f"[CameraCapture] Unknown backend '{self._backend}', using default")
+                    self._cap = cv2.VideoCapture(self._source)
+            else:
+                self._cap = cv2.VideoCapture(self._source)
             
             if not self._cap.isOpened():
                 self._last_error = f"Failed to open camera source: {self._source}"

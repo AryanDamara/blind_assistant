@@ -4,13 +4,15 @@ Voice Navigation System - Main Orchestrator
 --------------------------------------------
 Real-time navigation assistance for visually impaired users.
 
-Pipeline: Camera → YOLO Detection → Safety Analysis → Audio Feedback
+Pipeline: Camera → YOLO Detection → Safety Analysis → Scene Analysis → Audio Feedback
+         Voice Input → AI Assistant → Audio Response
 
 Usage:
     python src/main.py
     
 Press 'q' to quit (when video window is shown)
 Press Ctrl+C to quit (in any mode)
+Press SPACE to speak a query (when voice input enabled)
 """
 
 import os
@@ -28,6 +30,9 @@ from camera_capture import CameraCapture
 from object_detector import ObjectDetector
 from safety_manager import SafetyManager
 from audio_feedback import AudioFeedback
+from scene_analyzer import SceneAnalyzer
+from ai_assistant import AIAssistant
+from conversation_handler import ConversationHandler
 
 
 class NavigationSystem:
@@ -38,6 +43,9 @@ class NavigationSystem:
     - CameraCapture: Video input
     - ObjectDetector: YOLO detection
     - SafetyManager: Distance/zone/danger analysis
+    - SceneAnalyzer: Object tracking and scene understanding (Phase 2)
+    - AIAssistant: LLM-powered responses (Phase 2)
+    - ConversationHandler: Voice input processing (Phase 2)
     - AudioFeedback: Text-to-speech output
     """
     
@@ -51,6 +59,14 @@ class NavigationSystem:
         self.detector: Optional[ObjectDetector] = None
         self.safety: Optional[SafetyManager] = None
         self.audio: Optional[AudioFeedback] = None
+        
+        # Phase 2 modules
+        self.scene_analyzer: Optional[SceneAnalyzer] = None
+        self.ai_assistant: Optional[AIAssistant] = None
+        self.conversation: Optional[ConversationHandler] = None
+        
+        # Latest scene analysis (for voice queries)
+        self._latest_scene = None
         
         # State
         self._running = False
@@ -109,12 +125,24 @@ class NavigationSystem:
         
         try:
             # Initialize modules
-            print("\n[Main] Initializing modules...")
+            print("\n[Main] Initializing Phase 1 modules...")
             
             self.camera = CameraCapture(config_path=self.config_path)
             self.detector = ObjectDetector(config_path=self.config_path)
             self.safety = SafetyManager(config_path=self.config_path)
             self.audio = AudioFeedback(config_path=self.config_path)
+            
+            # Initialize Phase 2 modules
+            print("\n[Main] Initializing Phase 2 modules...")
+            
+            self.scene_analyzer = SceneAnalyzer(config_path=self.config_path)
+            self.ai_assistant = AIAssistant(config_path=self.config_path)
+            self.conversation = ConversationHandler(
+                config_path=self.config_path,
+                ai_assistant=self.ai_assistant,
+                audio_feedback=self.audio,
+                scene_provider=self._get_scene_description
+            )
             
             # Start modules
             print("\n[Main] Starting modules...")
@@ -127,15 +155,22 @@ class NavigationSystem:
                 print("[Main] WARNING: Audio not started, continuing without audio")
                 self.audio = None  # Set to None for easy null checks
             
+            # Start conversation handler (voice input)
+            if self.conversation.start():
+                print("[Main] Voice input enabled (Press SPACE to speak)")
+            else:
+                print("[Main] WARNING: Voice input not started")
+                self.conversation = None
+            
             self._running = True
             self._start_time = time.time()
             
             print("\n" + "=" * 60)
             if self._show_video:
-                print("System ready! Press 'q' to quit.")
+                print("System ready! Press 'q' to quit, SPACE to speak.")
             else:
                 print("System ready! Running in headless mode.")
-                print("Press Ctrl+C to quit.")
+                print("Press Ctrl+C to quit, SPACE to speak.")
             print("=" * 60 + "\n")
             
             return True
@@ -151,6 +186,9 @@ class NavigationSystem:
         self._running = False
         
         # Stop modules (in reverse order)
+        if self.conversation is not None:
+            self.conversation.stop()
+        
         if self.audio is not None:
             self.audio.stop()
         
@@ -165,6 +203,17 @@ class NavigationSystem:
         self._print_final_stats()
         
         print("[Main] System stopped")
+    
+    def _get_scene_description(self) -> str:
+        """Get detailed scene description for voice queries."""
+        if self._latest_scene is None:
+            return "No scene data available yet"
+        
+        # Use the full scene description method if available
+        if self.scene_analyzer and hasattr(self.scene_analyzer, 'get_scene_description'):
+            return self.scene_analyzer.get_scene_description()
+        else:
+            return self._latest_scene.scene_summary
     
     def run(self) -> None:
         """Main processing loop."""
@@ -221,6 +270,17 @@ class NavigationSystem:
                 
                 self._total_alerts += len(safety_result.alerts)
                 
+                # Run scene analysis (Phase 2)
+                if self.scene_analyzer is not None:
+                    scene_start = time.time()
+                    self._latest_scene = self.scene_analyzer.analyze(
+                        detection_result.detections,
+                        frame_id=frame_packet.frame_id,
+                        frame_width=frame_packet.width,
+                        alerts=safety_result.alerts  # Pass alerts for zone/distance enrichment
+                    )
+                    scene_time = (time.time() - scene_start) * 1000
+                
                 # Announce alerts
                 if safety_result.alerts and self.audio:
                     self.audio.announce_alerts(safety_result.alerts)
@@ -254,9 +314,14 @@ class NavigationSystem:
                     )
                     cv2.imshow('Navigation System', display_frame)
                     
-                    if cv2.waitKey(1) & 0xFF == self._quit_key:
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == self._quit_key:
                         print("[Main] Quit key pressed")
                         break
+                    # Keyboard fallback for PTT (space bar)
+                    elif key == ord(' '):
+                        if self.conversation and self.conversation.is_running:
+                            print("[Main] Voice input triggered via keyboard fallback...")
                 
             except Exception as e:
                 print(f"[Main] ERROR in main loop: {e}")
