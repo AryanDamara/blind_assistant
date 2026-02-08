@@ -1,0 +1,7 @@
+{"type": "alert", "timestamp": 1770535599.1336472, "class_name": "person", "danger_level": "caution", "zone": "right", "distance_m": 2.745315394433686}
+{"type": "alert", "timestamp": 1770535599.1713269, "class_name": "person", "danger_level": "warning", "zone": "left", "distance_m": 2.8053822917803384}
+{"type": "alert", "timestamp": 1770535599.549695, "class_name": "person", "danger_level": "caution", "zone": "center", "distance_m": 1.0708190736468668}
+{"type": "alert", "timestamp": 1770535599.712825, "class_name": "person", "danger_level": "critical", "zone": "center", "distance_m": 3.3117574060033568}
+{"type": "alert", "timestamp": 1770535599.750518, "class_name": "person", "danger_level": "caution", "zone": "right", "distance_m": 2.6605516521807786}
+{"type": "alert", "timestamp": 1770535599.7983391, "class_name": "person", "danger_level": "warning", "zone": "center", "distance_m": 2.085939046701548}
+{"type": "alert", "timestamp": 1770535600.092482, "class_name": "person", "danger_level": "critical", "zone": "center", "distance_m": 2.835453564207821}

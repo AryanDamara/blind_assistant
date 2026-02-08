@@ -1,0 +1,10 @@
+{
+  "session_id": "session_20260208_125639",
+  "start_time": "2026-02-08T12:56:39.072001",
+  "start_timestamp": 1770535599.07196,
+  "platform": "darwin",
+  "python_version": "3.13.6 (v3.13.6:4e665351082, Aug  6 2025, 11:22:35) [Clang 16.0.0 (clang-1600.0.26.6)]",
+  "end_time": "2026-02-08T12:56:40.398197",
+  "duration_seconds": 1.3262510299682617,
+  "total_frames": 100
+}

@@ -33,6 +33,7 @@ from audio_feedback import AudioFeedback
 from scene_analyzer import SceneAnalyzer
 from ai_assistant import AIAssistant
 from conversation_handler import ConversationHandler
+from telemetry import TelemetryLogger, LatencyMetrics
 
 
 class NavigationSystem:
@@ -64,6 +65,9 @@ class NavigationSystem:
         self.scene_analyzer: Optional[SceneAnalyzer] = None
         self.ai_assistant: Optional[AIAssistant] = None
         self.conversation: Optional[ConversationHandler] = None
+        
+        # Phase 3 modules
+        self.telemetry: Optional[TelemetryLogger] = None
         
         # Latest scene analysis (for voice queries)
         self._latest_scene = None
@@ -162,6 +166,14 @@ class NavigationSystem:
                 print("[Main] WARNING: Voice input not started")
                 self.conversation = None
             
+            # Start telemetry (Phase 3)
+            self.telemetry = TelemetryLogger(config_path=self.config_path)
+            if self.telemetry.start():
+                print("[Main] Telemetry logging enabled")
+            else:
+                print("[Main] WARNING: Telemetry not started")
+                self.telemetry = None
+            
             self._running = True
             self._start_time = time.time()
             
@@ -186,6 +198,10 @@ class NavigationSystem:
         self._running = False
         
         # Stop modules (in reverse order)
+        if self.telemetry is not None:
+            stats = self.telemetry.stop()
+            print(f"[Main] Session stats: avg latency {stats.avg_latency_ms:.1f}ms, p99 {stats.p99_latency_ms:.1f}ms")
+        
         if self.conversation is not None:
             self.conversation.stop()
         
@@ -271,6 +287,7 @@ class NavigationSystem:
                 self._total_alerts += len(safety_result.alerts)
                 
                 # Run scene analysis (Phase 2)
+                scene_time = 0.0
                 if self.scene_analyzer is not None:
                     scene_start = time.time()
                     self._latest_scene = self.scene_analyzer.analyze(
@@ -280,6 +297,24 @@ class NavigationSystem:
                         alerts=safety_result.alerts  # Pass alerts for zone/distance enrichment
                     )
                     scene_time = (time.time() - scene_start) * 1000
+                
+                # Log telemetry (Phase 3)
+                if self.telemetry is not None:
+                    metrics = LatencyMetrics(
+                        frame_id=frame_packet.frame_id,
+                        timestamp=time.time(),
+                        camera_ms=frame_packet.get_age(),
+                        detection_ms=detection_time,
+                        safety_ms=safety_time,
+                        scene_ms=scene_time,
+                        detection_count=detection_result.count,
+                        alert_count=len(safety_result.alerts)
+                    )
+                    self.telemetry.log_latency(metrics)
+                    
+                    # Log alerts
+                    for alert in safety_result.alerts:
+                        self.telemetry.log_alert(alert)
                 
                 # Announce alerts
                 if safety_result.alerts and self.audio:
@@ -426,22 +461,96 @@ class NavigationSystem:
 
 
 def main():
-    """Entry point."""
+    """Entry point with argument parsing."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="Voice Navigation System for Visually Impaired",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python src/main.py                  # Normal mode
+  python src/main.py --demo           # Demo mode (sample video, no mic)
+  python src/main.py --config my.yaml # Custom config
+        """
+    )
+    parser.add_argument('--demo', action='store_true',
+                       help='Demo mode: uses sample video, disables voice input')
+    parser.add_argument('--config', type=str, default=None,
+                       help='Path to config file')
+    parser.add_argument('--validate', action='store_true',
+                       help='Validate config and exit')
+    
+    args = parser.parse_args()
+    
     # Determine config path
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)
-    config_path = os.path.join(project_root, "config", "settings.yaml")
+    
+    if args.config:
+        config_path = args.config
+    else:
+        config_path = os.path.join(project_root, "config", "settings.yaml")
     
     # Check if config exists
     if not os.path.exists(config_path):
-        # Try relative path
         config_path = "config/settings.yaml"
         if not os.path.exists(config_path):
             print(f"[Main] ERROR: Config file not found")
-            print(f"  Tried: {config_path}")
             sys.exit(1)
     
     print(f"[Main] Using config: {config_path}")
+    
+    # Demo mode: create temp config with video source
+    if args.demo:
+        print("[Main] Running in DEMO mode")
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        
+        # Override settings for demo
+        demo_video = os.path.join(project_root, "data", "demo_video.mp4")
+        if not os.path.exists(demo_video):
+            print(f"[Main] Demo video not found: {demo_video}")
+            print("[Main] Using camera with voice input disabled")
+        else:
+            config['camera']['source'] = demo_video
+        
+        config['voice_input'] = config.get('voice_input', {})
+        config['voice_input']['enabled'] = False
+        config['debug'] = config.get('debug', {})
+        config['debug']['show_video'] = True
+        
+        # Save temp config
+        demo_config_path = os.path.join(project_root, "config", "_demo_settings.yaml")
+        with open(demo_config_path, 'w') as f:
+            yaml.dump(config, f)
+        config_path = demo_config_path
+    
+    # Validate config mode
+    if args.validate:
+        print("[Main] Validating configuration...")
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        
+        errors = []
+        required = ['camera', 'yolo', 'safety', 'audio']
+        for section in required:
+            if section not in config:
+                errors.append(f"Missing section: {section}")
+        
+        # Check thresholds
+        conf = config.get('yolo', {}).get('confidence_threshold', 0)
+        if not 0 < conf < 1:
+            errors.append(f"Invalid confidence_threshold: {conf}")
+        
+        if errors:
+            print("Validation FAILED:")
+            for e in errors:
+                print(f"  ✗ {e}")
+            sys.exit(1)
+        else:
+            print("✓ Configuration valid")
+            sys.exit(0)
     
     # Create and run system
     system = NavigationSystem(config_path=config_path)
@@ -450,3 +559,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

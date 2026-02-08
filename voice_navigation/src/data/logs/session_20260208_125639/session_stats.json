@@ -1,0 +1,29 @@
+{
+  "session_id": "session_20260208_125639",
+  "start_time": 1770535599.07196,
+  "end_time": 1770535600.396652,
+  "total_frames": 100,
+  "dropped_frames": 0,
+  "avg_latency_ms": 106.49570408932333,
+  "min_latency_ms": 55.731623504318,
+  "max_latency_ms": 483.8270852922235,
+  "p50_latency_ms": 84.32901371768232,
+  "p95_latency_ms": 418.18686505104245,
+  "p99_latency_ms": 483.8270852922235,
+  "avg_camera_ms": 10.378441827409256,
+  "avg_detection_ms": 78.05847964686575,
+  "avg_safety_ms": 4.80342906798006,
+  "avg_scene_ms": 10.235566564117226,
+  "avg_audio_ms": 3.0197869829510333,
+  "total_detections": 227,
+  "total_alerts": 99,
+  "alerts_by_level": {
+    "caution": 3,
+    "warning": 2,
+    "critical": 2
+  },
+  "latency_spikes": 0,
+  "errors": 0,
+  "peak_memory_mb": 0.0,
+  "avg_memory_mb": 0.0
+}
